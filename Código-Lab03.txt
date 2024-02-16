@@ -1,0 +1,223 @@
+;
+; Lab03.asm
+;
+; Created: 11/02/2024 
+; Author : Adrián Pascual
+;
+;****************************************************************
+// Encabezado
+;****************************************************************
+
+.include "M328PDEF.inc"
+.org 0x000
+	JMP MAIN	// Vector RESET
+.org 0x0006		// Vector de ISR: PCINT0
+	JMP ISR_PCINT0
+.org 0x0020
+	JMP	ISR_TIMER0_OVF
+
+MAIN:
+;****************************************************************
+// STACK
+;****************************************************************
+
+	LDI R16, LOW(RAMEND)
+	OUT SPL, R16
+	LDI R17, HIGH(RAMEND)
+	OUT SPH, R17
+
+;****************************************************************
+// CONFIGURACIÓN
+;****************************************************************
+// Tabla de Valores		0b0gfe_dcba
+	TABLA7SEG: .DB 0b0011_1111, 0b0000_0110 , 0b0101_1011, 0b0100_1111, 0b0110_0110, 0b0110_1101, 0b0111_1101, 0b0000_0111, 0b0111_1111, 0b0110_0111 
+;						#0			#1  			#2			#3			#4				#5			 #6			#7	 		 #8 			#9			
+;*****************************************************************
+
+SETUP:
+
+	LDI R16, (1 << CLKPCE)
+	STS CLKPR, R16			; Habilitar el prescaler
+
+	LDI R16, 0b0000_0110
+	STS CLKPR, R16			; Prescaler de 1MHz
+	CALL Init_T0            ; Inicializar el Timer 0
+	;********************************************************************************
+	LDI R16, 0b1111_1100		
+	OUT DDRB, R16		// Habilitar puerto B como entrada (Salida PB2 y PB3)
+
+	LDI R16, 0b0000_0011
+	OUT PORTB, R16		// Habilitar Pull-ups del puerto B (Todos excepto PB2 y PB3)
+	;********************************************************************************
+	LDI R16, (1 << PCIE0)
+	STS PCICR, R16		// Confugración de INT0 en flanco de subida y bajada
+	LDI R16, (1 << PCINT1) | (1 << PCINT0)
+	STS PCMSK0, R16		// Habilitar ISR PCINT 0 y 1
+	;********************************************************************************
+	LDI R16, 0xFF
+	OUT DDRD, R16		// Habilitar como salida el puerto D
+	;********************************************************************************
+	LDI R16, 0b0011_1111
+	OUT DDRC, R16		// Habilitar puerto C como salida
+
+	LDI R16, 0b1100_0000
+	OUT PORTC, R16		// Pull ups del puerto C
+	;********************************************************************************
+	LDI R17, 0x00								; Inicializar contador de 4 bits
+	OUT PORTD, R17
+	STS UCSR0B, R17
+
+
+	SEI		// Habilitar las interrupciones Globales GIE
+
+	LDI ZL, 0
+	LDI R24, 0x00		; Iniciar contador en 0 (LEDS)
+	LDI R20, 0x00		; Iniciar contador en 0 (Display1)
+	LDI R23, 0x00		; Iniciar contador en 0 (Display2)
+
+LOOP:
+
+	OUT PORTC, R24		// Mostrar el contador en los LEDS
+
+	; Mostrar el valor en los Displays
+// DISPLAY DE LOS SEGUNDOS
+	SBI PINB, PB3		// Encender PB3
+	LDI ZH, HIGH(TABLA7SEG << 1)
+	LDI ZL, LOW(TABLA7SEG << 1)
+	ADD ZL, R20
+	LPM R21, Z
+	
+	OUT PORTD, R21
+	
+	SBI PINB, PB3		// Apagar PB3
+	LDI R21, 0b0000_0000 // Dejar en 0 para que no se muestre en el otro display
+	OUT PORTD, R21
+	CLR ZL			// Reiniciar la posisión en la tabla
+	
+// DISPLAY DE LAS DECENAS DE SEGUNDOS
+	SBI PINB, PB2		// Encender PB2
+	LDI ZH, HIGH(TABLA7SEG << 1)
+	LDI ZL, LOW(TABLA7SEG << 1)
+	ADD ZL, R23
+	LPM R22, Z
+	
+	OUT PORTD, R22
+    SBI PINB, PB2		// Apagar PB2
+	
+	LDI R21, 0b0000_0000 // Dejar en 0 para que no se muestre en el otro display
+	OUT PORTD, R21
+	CLR ZL		// Reiniciar la posisión en la tabla
+
+	RJMP LOOP	// Bucle principal
+
+;****************************************************************
+// Subrutina de ISR PCINT0
+;****************************************************************
+
+ISR_PCINT0:
+	PUSH R16	// Guardamos en pila el registro R16
+	IN R16, SREG
+	PUSH R16	// Guardamos en pila el registro SREG
+
+	IN R19, PINB
+	SBRS R19, PB0
+	RJMP INCREMENTAR
+	SBRS R19, PB1
+	RJMP DECREMENTAR
+	RJMP SALIDA
+
+INCREMENTAR:
+	CALL ANTIRREBOTE
+	SBRS R19, PB0
+	INC R24			// Incrementar contador mostrado en los LEDS
+	CPI R24, 16
+	BREQ KEEP_ON	// Mantener encendido si se intenta aumentar cuando ya está en 15
+	OUT PORTC, R24
+	RJMP SALIDA
+
+DECREMENTAR:
+	CALL ANTIRREBOTE
+	SBRS R19, PB1
+    DEC R24			// Decrementar contador mostrado en los LEDS
+	CPI R24, 0xFF
+	BREQ RESET		// Hacer un reset cuando se quiera disminuir si ya está en 0
+    OUT PORTC, R24
+    RJMP SALIDA
+
+ANTIRREBOTE:
+	LDI R16, 100
+	DELAY:
+		DEC R16
+		CPI R16, 0
+		BRNE DELAY
+RET
+
+KEEP_ON:
+	LDI R24, 0b0000_1111
+	OUT PORTC, R24
+	RJMP SALIDA
+	
+RESET:
+	CLR R24
+	OUT PORTC, R24
+
+SALIDA:
+	
+	SBI PCIFR, PCIF0	; Apagar la bandera de ISR PCINT0
+
+	POP R16			// Obtener el valor de SREG
+	OUT	SREG, R16	// Restaurar los antiguos valores de SREG
+	POP R16			// Obetener el valor de R16
+	RETI			// Retornamos de la ISR
+
+;****************************************************************
+// Subrutina de ISR TIMER_OVF
+;****************************************************************
+
+ISR_TIMER0_OVF:
+
+	PUSH R16	// Guardamos en pila el registro R16
+	IN R16, SREG
+	PUSH R16	// Guardamos en pila el registro SREG
+
+	INC R20		// Incrementa los segundos (Display 1)
+
+    CPI R20, 10 
+	BREQ RESET_COUNTER
+	RJMP SALIR
+
+RESET_COUNTER:
+	
+	CLR R20		// Reiniciar el contador del Display1
+    INC R23		// Contador de decenas de segundos (Display2)
+	CPI R23, 6
+	BRNE SALIDA
+	CLR R23
+
+SALIR:
+	SBI TIFR0, TOV0		; Reinicia el bit TOV0
+
+	POP R16			// Obtener el valor de SREG
+	OUT	SREG, R16	// Restaurar los antiguos valores de SREG
+	POP R16			// Obetener el valor de R16
+	RETI
+
+;****************************************************************
+// Subrutina para inicializar el TIMER0
+;****************************************************************
+
+Init_T0:
+	
+	LDI R16, (1 << TOIE0)  ; Habilitar la interrupción de desbordamiento del Timer0
+    STS TIMSK0, R16        ; Escribir al registro TIMSK0
+
+    LDI R16, 0
+    OUT TCCR0A, R16        ; Modo normal 
+
+	LDI R16, 0     ; Valor de desbordamiento para 100 ms
+    OUT TCNT0, R16
+
+    LDI R16, (1 << CS02) | (1 << CS00)    ; Configurar el prescaler a 1024
+    OUT TCCR0B, R16
+
+    RET
